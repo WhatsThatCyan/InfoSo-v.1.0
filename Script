@@ -41,6 +41,185 @@
   observe("longtask", (e) => { vitals.longTasks++; vitals.longTaskTime += e.duration; });
 
   // ───────────────────────── tech detection ─────────────────────────
+  const txtOf = (x) => (x && typeof x === "object" ? x.text : String(x));
+
+  // CSS selector path for an element
+  const cssPath = (el) => {
+    if (!(el instanceof Element)) return "";
+    const parts = [];
+    while (el && el.nodeType === 1 && el !== document.documentElement) {
+      let s = el.tagName.toLowerCase();
+      if (el.id && document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) { parts.unshift(s + "#" + CSS.escape(el.id)); break; }
+      s += [...el.classList].slice(0, 2).map((c) => "." + CSS.escape(c)).join("");
+      const sib = el.parentElement ? [...el.parentElement.children].filter((c) => c.tagName === el.tagName) : [];
+      if (sib.length > 1) s += `:nth-of-type(${sib.indexOf(el) + 1})`;
+      parts.unshift(s);
+      el = el.parentElement;
+    }
+    return parts.join(" > ");
+  };
+
+  // Color helpers
+  const rgbOf = (c) => { const m = String(c).match(/[\d.]+/g); return m && m.length >= 3 ? { r: +m[0], g: +m[1], b: +m[2], a: m[3] !== undefined ? +m[3] : 1 } : null; };
+  const toHex = (c) => { const o = rgbOf(c); if (!o || o.a === 0) return null; return "#" + [o.r, o.g, o.b].map((n) => Math.round(n).toString(16).padStart(2, "0")).join(""); };
+  const lum = ({ r, g, b }) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const effBg = (el) => { while (el) { const c = rgbOf(getComputedStyle(el).backgroundColor); if (c && c.a > 0.95) return c; el = el.parentElement; } return { r: 255, g: 255, b: 255, a: 1 }; };
+  const contrastOf = (el) => {
+    const fg = rgbOf(getComputedStyle(el).color); if (!fg) return null;
+    const l1 = lum(fg), l2 = lum(effBg(el));
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
+
+  const strOf = (a) => {
+    try {
+      if (a instanceof Error) return a.message || String(a);
+      if (a instanceof Element) return cssPath(a);
+      if (typeof a === "object" && a !== null) return JSON.stringify(a);
+      return String(a);
+    } catch { return String(a); }
+  };
+
+  // Console / error capture (restored when the panel closes)
+  const logs = [];
+  const addLog = (type, msg) => {
+    logs.push({ t: new Date().toLocaleTimeString(), type, msg: trunc(msg, 300) });
+    if (logs.length > 200) logs.shift();
+    try { updateBadge(); } catch {}
+  };
+  function updateBadge() {
+    const n = logs.filter((l) => l.type === "error").length;
+    errEl.textContent = n ? `⚠ ${n}` : "";
+    errEl.title = n ? "Errors captured — click to open the Console tab" : "";
+  }
+  const origConsole = { error: console.error, warn: console.warn };
+  const wrapErr = function (...a) { addLog("error", a.map(strOf).join(" ")); return origConsole.error.apply(this, a); };
+  const wrapWarn = function (...a) { addLog("warn", a.map(strOf).join(" ")); return origConsole.warn.apply(this, a); };
+  console.error = wrapErr;
+  console.warn = wrapWarn;
+  const onErr = (e) => {
+    const t = e.target;
+    if (t && t !== window && (t.src || t.href)) addLog("error", "Failed to load " + (t.tagName || "").toLowerCase() + ": " + (t.src || t.href));
+    else addLog("error", `${e.message || "Script error"} (${trunc((e.filename || "").split("/").pop(), 40)}:${e.lineno || 0})`);
+  };
+  const onRej = (e) => addLog("error", "Unhandled promise rejection: " + strOf(e.reason));
+  window.addEventListener("error", onErr, true);
+  window.addEventListener("unhandledrejection", onRej);
+
+  // Run JavaScript from the Console tab
+  const replLog = [];
+  const runJS = (code) => {
+    const push = (text, level) => { replLog.push({ text, level }); if (replLog.length > 50) replLog.shift(); render(); };
+    try {
+      const v = (0, eval)(code);
+      if (v && typeof v.then === "function") {
+        v.then((r) => push(`› ${code}\n  (resolved) ${trunc(strOf(r), 500)}`), (e) => push(`› ${code}\n  (rejected) ${trunc(strOf(e), 500)}`, "bad"));
+        push(`› ${code}\n  Promise {pending}`);
+      } else push(`› ${code}\n  ${v === undefined ? "undefined" : trunc(typeof v === "function" ? String(v) : strOf(v), 500)}`);
+    } catch (e) { push(`› ${code}\n  ${e && e.message ? e.message : e}`, "bad"); }
+  };
+
+  // Live network log (non-invasive: uses PerformanceObserver, no fetch/XHR patching)
+  const netLog = [];
+  observe("resource", (e) => { netLog.push(e); if (netLog.length > 500) netLog.shift(); });
+
+  // Element picker
+  let picking = false, picked = null;
+  const overlay = document.createElement("div");
+  const setOverlay = (el) => {
+    if (!el || !el.getBoundingClientRect) { overlay.style.cssText = "display:none"; return; }
+    const r = el.getBoundingClientRect();
+    overlay.style.cssText = `position:fixed;pointer-events:none;z-index:2147483646;border:2px solid #4ea1ff;background:rgba(78,161,255,.22);left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;`;
+  };
+  const inPanel = (e) => e.composedPath().includes(host);
+  const swallow = (e) => { if (inPanel(e)) return; e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+  const onMove = (e) => { if (!inPanel(e)) setOverlay(e.target); };
+  const onPickClick = (e) => {
+    if (inPanel(e)) return;
+    swallow(e);
+    picked = e.target;
+    setPicking(false);
+    current = "Inspect";
+    render();
+  };
+  function setPicking(on) {
+    if (on === picking) return;
+    picking = on;
+    const fn = on ? "addEventListener" : "removeEventListener";
+    document[fn]("mousemove", onMove, true);
+    document[fn]("click", onPickClick, true);
+    ["mousedown", "mouseup", "pointerdown", "pointerup"].forEach((t) => document[fn](t, swallow, true));
+    if (on) { overlay.style.cssText = "display:none"; if (!overlay.isConnected) document.documentElement.appendChild(overlay); }
+    else setOverlay(null);
+    pickBtn.classList.toggle("on", on);
+    flash(on ? "Click an element on the page (Esc to cancel)" : "Picker off");
+    draw();
+  }
+
+  // Internal link checker
+  let linkCheck = null;
+  async function runLinkCheck() {
+    if (linkCheck && linkCheck.running) return;
+    const urls = [...new Set([...document.links]
+      .filter((a) => a.hostname === location.hostname && /^https?:$/.test(a.protocol))
+      .map((a) => a.href.split("#")[0]))].slice(0, 60);
+    linkCheck = { running: true, done: 0, total: urls.length, ok: 0, bad: [] };
+    let i = 0;
+    const worker = async () => {
+      while (i < urls.length) {
+        const u = urls[i++];
+        try {
+          let r = await fetch(u, { method: "HEAD", credentials: "same-origin", cache: "no-store" });
+          if (r.status === 405 || r.status === 501) r = await fetch(u, { method: "GET", credentials: "same-origin", cache: "no-store" });
+          if (r.status >= 400) linkCheck.bad.push({ text: `${r.status}  ${u}`, level: "bad" }); else linkCheck.ok++;
+        } catch { linkCheck.bad.push({ text: `ERR  ${u}`, level: "bad" }); }
+        linkCheck.done++;
+        flash(`Checking links ${linkCheck.done}/${linkCheck.total}`);
+      }
+    };
+    flash(`Checking ${urls.length} links…`);
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    linkCheck.running = false;
+    render();
+  }
+
+  // Exports, docking, cookie cleanup
+  const toMarkdown = (tabs) => {
+    let o = `# InfoSo report\n\n- URL: ${location.href}\n- Generated: ${new Date().toISOString()}\n`;
+    for (const [tab, secs] of Object.entries(toPlain(tabs))) {
+      o += `\n## ${tab}\n`;
+      for (const [title, data] of Object.entries(secs)) {
+        o += `\n### ${title}\n\n`;
+        if (Array.isArray(data)) o += data.length ? data.map((x) => `- ${x}`).join("\n") + "\n" : "_None_\n";
+        else o += Object.entries(data).map(([k, v]) => `- **${k}:** ${v}`).join("\n") + "\n";
+      }
+    }
+    return o;
+  };
+  const downloadFile = (name, text, type) => {
+    try {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([text], { type }));
+      a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      flash("Downloaded");
+    } catch { flash("Download blocked"); }
+  };
+  const dock = (c) => {
+    const r = host.getBoundingClientRect(), m = 12;
+    host.style.left = (c.includes("r") ? Math.max(0, innerWidth - r.width - m) : m) + "px";
+    host.style.top = (c.includes("b") ? Math.max(0, innerHeight - r.height - m) : m) + "px";
+  };
+  const delCookies = () => {
+    document.cookie.split(";").forEach((c) => {
+      const n = c.split("=")[0].trim();
+      if (!n) return;
+      ["", "; domain=" + location.hostname, "; domain=." + location.hostname].forEach((dom) => {
+        document.cookie = `${n}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/${dom}`;
+      });
+    });
+  };
+
   const detectTech = (scriptSrcs, sheetHrefs) => {
     const d = document, w = window, found = [];
     const add = (name, ver) => found.push(ver ? `${name} ${ver}` : name);
@@ -112,7 +291,12 @@
       if (dep > maxDepth) maxDepth = dep;
     }
 
-    const words = (d.body?.innerText || "").trim().split(/\s+/).filter(Boolean).length;
+    const bodyText = d.body?.innerText || "";
+    const words = bodyText.trim().split(/\s+/).filter(Boolean).length;
+    const stop = new Set("the and for that with this from your are you not have was but can all our out has will more about they their which when what there been one would into than them its also other how who any may use new get just like over only such some time these see his her she him were had does did here then very each much many most make made well need want your".split(" "));
+    const freq = {};
+    (bodyText.toLowerCase().match(/[a-z][a-z'-]{3,}/g) || []).forEach((w) => { if (!stop.has(w)) freq[w] = (freq[w] || 0) + 1; });
+    const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 15).map(([w, n]) => `${w}  ×${n}`);
     const scripts = [...d.scripts];
     const scriptSrcs = scripts.map((s) => s.src).filter(Boolean);
     const sheetHrefs = [...d.querySelectorAll('link[rel~="stylesheet" i]')].map((l) => l.href).filter(Boolean);
@@ -175,6 +359,20 @@
     const ssKeys = safe(() => Object.keys(sessionStorage), null);
     const sizeOf = (store, keys) => keys ? keys.map((k) => `${k}  (${fmtBytes((k.length + (store.getItem(k) || "").length) * 2)})`) : [];
     const cookies = d.cookie ? d.cookie.split(";").map((c) => c.trim()).filter(Boolean).map((c) => { const i = c.indexOf("="); return `${c.slice(0, i)} = ${trunc(c.slice(i + 1), 40)}`; }) : [];
+    const cookieItems = (await asafe(async () => (await cookieStore.getAll()).map((c) => ({
+      text: `${c.name} = ${trunc(c.value, 30)}   [${c.secure ? "Secure" : "not Secure"}, SameSite=${c.sameSite || "?"}, ${c.expires ? "exp " + new Date(c.expires).toLocaleDateString() : "session"}]`,
+      level: !c.secure && location.protocol === "https:" ? "warn" : undefined,
+    })), null)) || cookies;
+
+    const ld = [];
+    d.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
+      try {
+        const j = JSON.parse(s.textContent);
+        (Array.isArray(j) ? j : j["@graph"] || [j]).forEach((x) => ld.push(x && x["@type"] ? [].concat(x["@type"]).join(" / ") : "Unknown type"));
+      } catch { ld.push({ text: "Invalid JSON-LD block", level: "warn" }); }
+    });
+    const microdata = d.querySelectorAll("[itemscope]").length;
+
     const idb = await asafe(async () => (await indexedDB.databases()).map((x) => `${x.name} (v${x.version})`), []);
     const sws = await asafe(async () => (await navigator.serviceWorker.getRegistrations()).map((r) => r.scope), []);
     const cacheNames = await asafe(async () => await caches.keys(), []);
@@ -252,6 +450,7 @@
         "twitter:site": na(meta("twitter:site")),
       }),
       L("Favicons", faviconList.length ? faviconList : [location.origin + "/favicon.ico  (default guess)"]),
+      L(`Structured data (JSON-LD; ${microdata} microdata items)`, ld),
     ];
 
     tabs["Tech"] = [
@@ -324,12 +523,19 @@
         "Cache Storage": cacheNames.length,
         "Storage used": quota,
       }),
-      L("Cookies", cookies),
+      L("Cookies", cookieItems),
       L("localStorage keys", sizeOf(safe(() => localStorage, null), lsKeys)),
       L("sessionStorage keys", sizeOf(safe(() => sessionStorage, null), ssKeys)),
       L("IndexedDB", idb),
       L("Service workers", sws),
       L("Cache names", cacheNames),
+      {
+        title: "Actions", buttons: [
+          { label: "Clear localStorage", fn: () => { if (confirm("Clear ALL localStorage for this site?")) { safe(() => localStorage.clear()); render(); } } },
+          { label: "Clear sessionStorage", fn: () => { if (confirm("Clear ALL sessionStorage for this site?")) { safe(() => sessionStorage.clear()); render(); } } },
+          { label: "Delete JS-visible cookies", fn: () => { if (confirm("Delete all cookies visible to JavaScript?")) { delCookies(); render(); } } },
+        ],
+      },
     ];
 
     tabs["Page"] = [
@@ -355,6 +561,18 @@
       L("Largest images (natural size)", bigImgs),
       L("Images missing alt", noAlt.slice(0, 10).map((i) => trunc(i.currentSrc || i.src || "(no src)", 90))),
       L("Forms", forms),
+      L("Top keywords", topWords),
+      {
+        title: "Link checker (internal links, up to 60)",
+        rows: linkCheck ? {
+          "Status": linkCheck.running ? `Running ${linkCheck.done}/${linkCheck.total}` : "Done",
+          "Checked": `${linkCheck.done}/${linkCheck.total}`,
+          "OK": lv(String(linkCheck.ok), "good"),
+          "Broken": linkCheck.bad.length ? lv(String(linkCheck.bad.length), "bad") : lv("0", "good"),
+        } : { "Status": "Not run yet" },
+        buttons: [{ label: linkCheck && linkCheck.running ? "Running…" : "Run link check", fn: runLinkCheck }],
+      },
+      L("Broken links", linkCheck ? linkCheck.bad : []),
     ];
 
     tabs["Security"] = [
@@ -432,6 +650,12 @@
         title: "Actions", buttons: [
           { label: "Copy JSON", fn: () => copy(JSON.stringify(toPlain(tabData), null, 2)) },
           { label: "Download JSON", fn: downloadJSON },
+          { label: "Copy Markdown report", fn: () => copy(toMarkdown(tabData)) },
+          { label: "Download report (.md)", fn: () => downloadFile(`infoso-${location.hostname || "page"}.md`, toMarkdown(tabData), "text/markdown") },
+          { label: "Dock ↖", fn: () => dock("tl") },
+          { label: "Dock ↗", fn: () => dock("tr") },
+          { label: "Dock ↙", fn: () => dock("bl") },
+          { label: "Dock ↘", fn: () => dock("br") },
           { label: "Copy all links", fn: () => copy([...document.links].map((a) => a.href).join("\n")) },
           { label: "Copy image URLs", fn: () => copy([...document.images].map((i) => i.currentSrc || i.src).join("\n")) },
           { label: "Copy page text", fn: () => copy(document.body?.innerText || "") },
@@ -442,7 +666,181 @@
       },
     ];
 
-    return tabs;
+    // ── Network (live) ──
+    const slow = netLog.filter((e) => e.duration > 1000).length;
+    const failedN = netLog.filter((e) => e.responseStatus >= 400).length;
+    tabs["Network"] = [
+      S("Live request log", {
+        "Requests seen": netLog.length,
+        "Failed (HTTP ≥ 400)": failedN ? lv(String(failedN), "bad") : lv("0", "good"),
+        "Slow (> 1 s)": slow ? lv(String(slow), "warn") : lv("0", "good"),
+      }),
+      L("Requests (newest first)", [...netLog].reverse().slice(0, 200).map((e) => ({
+        text: `${e.responseStatus || "—"}  ${e.initiatorType || "other"}  ${Math.round(e.duration)} ms  ${e.transferSize ? fmtBytes(e.transferSize) : "—"}  ${trunc(e.name, 80)}`,
+        level: e.responseStatus >= 400 ? "bad" : e.duration > 1000 ? "warn" : undefined,
+      }))),
+    ];
+
+    // ── Design (palette, fonts, CSS variables) ──
+    const cnt = (m, k) => { m[k] = (m[k] || 0) + 1; };
+    const topN = (m, n) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n);
+    const tc = {}, bc = {}, bd = {}, ff = {}, fsz = {};
+    for (const el of all.slice(0, 1500)) {
+      if (el === host || el.closest("head")) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === "none") continue;
+      const c1 = toHex(cs.color); if (c1) cnt(tc, c1);
+      const c2 = toHex(cs.backgroundColor); if (c2) cnt(bc, c2);
+      if (parseFloat(cs.borderTopWidth) > 0) { const c3 = toHex(cs.borderTopColor); if (c3) cnt(bd, c3); }
+      cnt(ff, cs.fontFamily.split(",")[0].replace(/["']/g, "").trim());
+      cnt(fsz, cs.fontSize);
+    }
+    const cssVars = [];
+    try {
+      for (const sheet of d.styleSheets) {
+        let rules; try { rules = sheet.cssRules; } catch { continue; }
+        for (const r of rules) {
+          if (r.selectorText === ":root" || r.selectorText === "html") {
+            for (const p of r.style) if (p.startsWith("--")) cssVars.push(`${p}: ${trunc(r.style.getPropertyValue(p).trim(), 60)}`);
+          }
+        }
+      }
+    } catch {}
+    tabs["Design"] = [
+      { title: "Text colors", swatches: topN(tc, 12).map(([c, n]) => ({ c, n })) },
+      { title: "Background colors", swatches: topN(bc, 12).map(([c, n]) => ({ c, n })) },
+      { title: "Border colors", swatches: topN(bd, 8).map(([c, n]) => ({ c, n })) },
+      L("Font families (computed)", topN(ff, 8).map(([k, n]) => `${k}  ×${n}`)),
+      L("Font sizes", topN(fsz, 8).map(([k, n]) => `${k}  ×${n}`)),
+      L("CSS variables on :root", cssVars.slice(0, 80)),
+    ];
+
+    // ── Accessibility ──
+    const sel = (el) => trunc(cssPath(el), 90);
+    const accName = (el) => (el.getAttribute("aria-label") || el.textContent || el.title || el.querySelector("img[alt]")?.alt || "").trim();
+    const noLabel = [...d.querySelectorAll("input,textarea,select")].filter((el) =>
+      !["hidden", "submit", "button", "reset", "image"].includes(el.type) && !(el.labels && el.labels.length) &&
+      !el.getAttribute("aria-label") && !el.getAttribute("aria-labelledby") && !el.title);
+    const btnNo = [...d.querySelectorAll("button,[role=button]")].filter((b) => !accName(b) && !b.getAttribute("aria-labelledby"));
+    const linkNo = [...d.querySelectorAll("a[href]")].filter((a) => !accName(a) && !a.getAttribute("aria-labelledby"));
+    const idc = {}; all.forEach((el) => { if (el.id) idc[el.id] = (idc[el.id] || 0) + 1; });
+    const dupIds = Object.entries(idc).filter(([, n]) => n > 1);
+    const skips = []; let prevL = 0;
+    hs.forEach((x) => { const l = +x.tagName[1]; if (prevL && l > prevL + 1) skips.push(`H${prevL} → H${l}: ${trunc(x.textContent.trim(), 50)}`); prevL = l; });
+    const posTab = d.querySelectorAll('[tabindex]:not([tabindex="0"]):not([tabindex^="-"])').length;
+    const lowC = [];
+    for (const el of all.slice(0, 1500)) {
+      if (lowC.length >= 12) break;
+      if (el === host || !el.offsetParent) continue;
+      if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+      const r = contrastOf(el);
+      if (r && r < 4.5) lowC.push({ text: `${r.toFixed(2)}:1  ${sel(el)}  "${trunc(el.textContent.trim(), 24)}"`, level: r < 3 ? "bad" : "warn" });
+    }
+    const zoomBlocked = /user-scalable\s*=\s*(no|0)|maximum-scale\s*=\s*1(\.0)?\b/i.test(meta("viewport") || "");
+    const issues = noLabel.length + btnNo.length + linkNo.length + dupIds.length + skips.length + noAlt.length + lowC.length +
+      (h1count !== 1 ? 1 : 0) + (d.documentElement.lang ? 0 : 1) + (zoomBlocked ? 1 : 0) + (posTab ? 1 : 0);
+    const flag = (n) => (n ? lv(String(n), "warn") : lv("0", "good"));
+    tabs["Access"] = [
+      S("Quick audit (approximate)", {
+        "Issues found": lv(String(issues), issues === 0 ? "good" : issues < 8 ? "warn" : "bad"),
+        "Page language set": d.documentElement.lang ? lv("Yes", "good") : lv("Missing", "warn"),
+        "Exactly one H1": h1count === 1 ? lv("Yes", "good") : lv(`No (${h1count})`, "warn"),
+        "Images missing alt": flag(noAlt.length),
+        "Inputs without labels": flag(noLabel.length),
+        "Buttons without a name": flag(btnNo.length),
+        "Links without text": flag(linkNo.length),
+        "Duplicate IDs": flag(dupIds.length),
+        "Skipped heading levels": flag(skips.length),
+        "Positive tabindex elements": flag(posTab),
+        "Zoom disabled in viewport": zoomBlocked ? lv("Yes", "bad") : lv("No", "good"),
+      }),
+      S("Landmarks", {
+        "main": d.querySelectorAll("main,[role=main]").length,
+        "nav": d.querySelectorAll("nav,[role=navigation]").length,
+        "header": d.querySelectorAll("header,[role=banner]").length,
+        "footer": d.querySelectorAll("footer,[role=contentinfo]").length,
+        "aside": d.querySelectorAll("aside,[role=complementary]").length,
+        "ARIA attributes in use": d.querySelectorAll("[role],[aria-label],[aria-labelledby],[aria-describedby],[aria-hidden]").length,
+      }),
+      L("Low-contrast text (approx.)", lowC),
+      L("Inputs without labels", noLabel.slice(0, 15).map(sel)),
+      L("Buttons without a name", btnNo.slice(0, 15).map(sel)),
+      L("Links without text", linkNo.slice(0, 15).map(sel)),
+      L("Duplicate IDs", dupIds.slice(0, 15).map(([id, n]) => `#${id}  ×${n}`)),
+      L("Skipped heading levels", skips.slice(0, 15)),
+    ];
+
+    // ── Console ──
+    const errN = logs.filter((l) => l.type === "error").length;
+    const warnN = logs.filter((l) => l.type === "warn").length;
+    tabs["Console"] = [
+      S("Captured since InfoSo opened", {
+        "Errors": errN ? lv(String(errN), "bad") : lv("0", "good"),
+        "Warnings": warnN ? lv(String(warnN), "warn") : 0,
+      }),
+      L("Messages (newest first)", [...logs].reverse().map((l) => ({ text: `[${l.t}] ${l.type.toUpperCase()}  ${l.msg}`, level: l.type === "error" ? "bad" : "warn" }))),
+      { title: "Run JavaScript", input: { placeholder: "e.g. document.title   (press Enter)", run: runJS } },
+      L("Results (newest first)", [...replLog].reverse()),
+      { title: "Actions", buttons: [{ label: "Clear console tab", fn: () => { logs.length = 0; replLog.length = 0; updateBadge(); render(); } }] },
+    ];
+
+    // ── Inspect (element picker) ──
+    if (picked && picked.isConnected) {
+      const el = picked, cs = getComputedStyle(el), r = el.getBoundingClientRect(), ratio = contrastOf(el);
+      tabs["Inspect"] = [
+        S("Element", {
+          "Selector": cssPath(el),
+          "Tag": el.tagName.toLowerCase(),
+          "ID": el.id || "None",
+          "Classes": [...el.classList].join(" ") || "None",
+          "Size": `${Math.round(r.width)} × ${Math.round(r.height)} px`,
+          "Position (page)": `${Math.round(r.left + scrollX)}, ${Math.round(r.top + scrollY)}`,
+          "Children": el.children.length,
+          "Text": trunc((el.textContent || "").trim().replace(/\s+/g, " "), 100) || "None",
+        }),
+        S("Box model", {
+          "Display": cs.display,
+          "Position": cs.position,
+          "Z-index": cs.zIndex,
+          "Margin": `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
+          "Padding": `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+          "Border": `${cs.borderTopWidth} ${cs.borderTopStyle} ${toHex(cs.borderTopColor) || "transparent"}`,
+          "Border radius": cs.borderRadius,
+          "Overflow": cs.overflow,
+          "Opacity": cs.opacity,
+        }),
+        S("Typography & color", {
+          "Font": cs.fontFamily,
+          "Size / weight": `${cs.fontSize} / ${cs.fontWeight}`,
+          "Line height": cs.lineHeight,
+          "Text color": toHex(cs.color) || cs.color,
+          "Background": toHex(cs.backgroundColor) || "transparent",
+          "Contrast ratio": ratio
+            ? lv(ratio.toFixed(2) + ":1" + (ratio >= 7 ? " (AAA)" : ratio >= 4.5 ? " (AA)" : ratio >= 3 ? " (large text only)" : " (fails)"), ratio >= 4.5 ? "good" : ratio >= 3 ? "warn" : "bad")
+            : "N/A",
+        }),
+        L("Attributes", [...el.attributes].map((a) => `${a.name}="${trunc(a.value, 80)}"`)),
+        {
+          title: "Actions", buttons: [
+            { label: "Copy selector", fn: () => copy(cssPath(el)) },
+            { label: "Copy outerHTML", fn: () => copy(el.outerHTML) },
+            { label: "Scroll to it", fn: () => { el.scrollIntoView({ behavior: "smooth", block: "center" }); setTimeout(() => { setOverlay(el); setTimeout(() => setOverlay(null), 1500); }, 400); } },
+            { label: "Hide element", fn: () => { el.style.display = "none"; render(); } },
+            { label: "Remove element", fn: () => { if (confirm("Remove this element from the page?")) { el.remove(); picked = null; render(); } } },
+            { label: "Pick another", fn: () => setPicking(true) },
+          ],
+        },
+      ];
+    } else {
+      picked = null;
+      tabs["Inspect"] = [
+        S("Element inspector", { "Status": picking ? "Click an element on the page… (Esc to cancel)" : "Nothing picked yet — press the ⌖ button in the header" }),
+        { title: "Actions", buttons: [{ label: "Start picking", fn: () => setPicking(true) }] },
+      ];
+    }
+
+    const order = ["Overview", "Tech", "Perf", "Network", "Design", "Access", "Storage", "Page", "Security", "Console", "Inspect", "Device", "Headers", "Tools"];
+    return Object.fromEntries(order.filter((n) => tabs[n]).map((n) => [n, tabs[n]]));
   };
 
   // ───────────────────────── UI plumbing ─────────────────────────
@@ -464,7 +862,8 @@
       out[tab] = {};
       for (const s of secs) {
         if (s.rows) out[tab][s.title] = Object.fromEntries(Object.entries(s.rows).map(([k, v]) => [k, v && typeof v === "object" ? v.v : v]));
-        else if (s.list) out[tab][s.title] = s.list;
+        else if (s.list) out[tab][s.title] = s.list.map(txtOf);
+        else if (s.swatches) out[tab][s.title] = s.swatches.map((x) => `${x.c} ×${x.n}`);
       }
     }
     return out;
@@ -493,6 +892,23 @@
     cssToggle("Outline all elements", `*{outline:1px solid rgba(255,70,70,.55)!important}`),
     cssToggle("Highlight images missing alt", `img:not([alt]){outline:4px solid #ff2d55!important;outline-offset:-4px!important}`),
     cssToggle("Highlight links", `a[href]{background:rgba(255,235,59,.55)!important;outline:1px solid #f9a825!important}`),
+    { label: "Inspect element (click on page)", get: () => picking, set: (on) => setPicking(on) },
+    cssToggle("Label headings (H1–H6)", ["h1", "h2", "h3", "h4", "h5", "h6"].map((t) => `${t}::before{content:"${t.toUpperCase()}";background:#4ea1ff;color:#fff;font:700 10px/1 sans-serif;padding:2px 4px;margin-right:6px;border-radius:3px;vertical-align:middle}`).join("")),
+    cssToggle("Highlight external links", `a[href^="http"]:not([href*="${location.hostname}"]){outline:2px solid #ff9800!important;background:rgba(255,152,0,.25)!important}`),
+    cssToggle("Highlight empty links", `a:not([href]),a[href=""],a[href="#"]{outline:3px dashed #ff2d55!important}`),
+    (() => {
+      let disabled = [];
+      return {
+        label: "Disable all page CSS",
+        get: () => disabled.length > 0,
+        set: (on) => {
+          try {
+            if (on) { disabled = [...document.styleSheets].filter((s) => !s.disabled); disabled.forEach((s) => { s.disabled = true; }); }
+            else { disabled.forEach((s) => { s.disabled = false; }); disabled = []; }
+          } catch { flash("Blocked by page"); }
+        },
+      };
+    })(),
     cssToggle("Freeze animations", `*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}`),
     cssToggle("Hide images", `img,picture,video,svg{visibility:hidden!important}`),
     cssToggle("Invert page colors", `html{filter:invert(1) hue-rotate(180deg)!important}img,video,picture{filter:invert(1) hue-rotate(180deg)!important}#${ID}{filter:invert(1) hue-rotate(180deg)!important}`),
@@ -576,18 +992,42 @@
     .foot label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
     .foot input[type=range] { width: 60px; }
   `;
-  try { const sh = new CSSStyleSheet(); sh.replaceSync(css); root.adoptedStyleSheets = [sh]; }
-  catch { const st = document.createElement("style"); st.textContent = css; root.append(st); }
+  const css2 = `
+    .ib.on { background: #4ea1ff; color: #fff; }
+    .err { color: #ff5c5c; cursor: pointer; font-weight: 600; }
+    .sw { display: flex; align-items: center; gap: 8px; padding: 2px 0; cursor: copy; font: 11px ui-monospace, Menlo, Consolas, monospace; }
+    .swb { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #3a4250; flex: none; }
+    input.code { width: 100%; margin: 4px 0; background: #0f1216; border: 1px solid #2c323c; color: #e6e9ef; border-radius: 6px;
+      padding: 5px 8px; font: 11px ui-monospace, Menlo, Consolas, monospace; outline: none; }
+    input.code:focus { border-color: #4ea1ff; }
+    .panel.light { background: #fff; color: #1b1f24; border-color: #d0d7de; }
+    .light .bar, .light .foot { background: #f0f2f5; border-color: #d0d7de; }
+    .light .tabs, .light .search { background: #f6f8fa; border-color: #d0d7de; }
+    .light .search input, .light input.code { background: #fff; color: #1b1f24; border-color: #d0d7de; }
+    .light .ib, .light .btn { background: #e6e9ee; border-color: #d0d7de; color: #1b1f24; }
+    .light .ib:hover, .light .btn:hover { background: #d6dbe3; }
+    .light .ib.on { background: #0969da; color: #fff; }
+    .light .row, .light .li { border-bottom-color: #e6e9ee; }
+    .light .k, .light .tab, .light .ver, .light .foot, .light .empty { color: #59636e; }
+    .light .tab.on, .light h4 { color: #0969da; }
+    .light .tab.on { border-bottom-color: #0969da; }
+    .light .v:hover, .light .li:hover { background: #eef3f9; }
+    .light .good { color: #1a7f37; } .light .warn { color: #9a6700; } .light .bad, .light .err { color: #cf222e; }
+  `;
+  try { const sh = new CSSStyleSheet(); sh.replaceSync(css + css2); root.adoptedStyleSheets = [sh]; }
+  catch { const st = document.createElement("style"); st.textContent = css + css2; root.append(st); }
 
   const panel = h("div", { class: "panel" });
   const title = h("span", { class: "title" },
     h("span", { text: "📄 InfoSo" }),
-    h("small", { class: "ver", text: "v.1.0" }));
+    h("small", { class: "ver", text: "v.1.1" }));
   const refreshBtn = h("button", { class: "ib", title: "Refresh", text: "⟳" });
   const copyBtn = h("button", { class: "ib", title: "Copy everything as JSON", text: "⧉" });
   const minBtn = h("button", { class: "ib", title: "Minimize", text: "–" });
   const closeBtn = h("button", { class: "ib close", title: "Close", text: "✕" });
-  const bar = h("div", { class: "bar" }, title, refreshBtn, copyBtn, minBtn, closeBtn);
+  const pickBtn = h("button", { class: "ib", title: "Inspect an element on the page", text: "⌖" });
+  const themeBtn = h("button", { class: "ib", title: "Toggle light / dark panel", text: "◐" });
+  const bar = h("div", { class: "bar" }, title, pickBtn, themeBtn, refreshBtn, copyBtn, minBtn, closeBtn);
 
   const tabsEl = h("div", { class: "tabs" });
   const searchInput = h("input", { type: "text", placeholder: "Filter this tab…" });
@@ -598,7 +1038,8 @@
   const liveBox = h("input", { type: "checkbox" });
   const liveLabel = h("label", { title: "Auto-refresh every 3 seconds" }, liveBox, "Live");
   const opacity = h("input", { type: "range", min: "40", max: "100", value: "100", title: "Panel opacity" });
-  const foot = h("div", { class: "foot" }, statusEl, fpsEl, liveLabel, opacity);
+  const errEl = h("span", { class: "err", onclick: () => { current = "Console"; draw(); } });
+  const foot = h("div", { class: "foot" }, statusEl, errEl, fpsEl, liveLabel, opacity);
 
   panel.append(bar, tabsEl, searchWrap, body, foot);
   root.append(panel);
@@ -620,11 +1061,15 @@
     const names = Object.keys(tabData);
     if (!names.includes(current)) current = names[0] || "Overview";
     tabsEl.replaceChildren(...names.map((n) => h("button", {
-      class: "tab" + (n === current ? " on" : ""), text: n,
+      class: "tab" + (n === current ? " on" : ""),
+      text: n === "Console" && logs.some((l) => l.type === "error") ? `Console (${logs.filter((l) => l.type === "error").length})` : n,
       onclick: () => { current = n; draw(); body.scrollTop = 0; },
     })));
 
     const st = body.scrollTop;
+    const ae = root.activeElement;
+    const hadFocus = !!(ae && ae.classList && ae.classList.contains("code"));
+    const typed = hadFocus ? ae.value : "";
     const q = query.trim().toLowerCase();
     const frag = [];
 
@@ -643,9 +1088,26 @@
         }
       }
       if (sec.list) {
-        const items = sec.list.filter((x) => !q || secHit || String(x).toLowerCase().includes(q));
+        const items = sec.list.filter((x) => !q || secHit || txtOf(x).toLowerCase().includes(q));
         if (!items.length && !q) parts.push(h("div", { class: "empty", text: "None" }));
-        items.forEach((x) => parts.push(h("div", { class: "li", text: String(x), title: "Click to copy", onclick: () => copy(String(x).trim()) })));
+        items.forEach((x) => parts.push(h("div", { class: "li" + (x && x.level ? " " + x.level : ""), text: txtOf(x), title: "Click to copy", onclick: () => copy(txtOf(x).trim()) })));
+      }
+      if (sec.swatches) {
+        sec.swatches.forEach((s) => {
+          if (q && !secHit && !`${s.c} ${s.n}`.toLowerCase().includes(q)) return;
+          const box = h("span", { class: "swb" });
+          box.style.background = s.c;
+          parts.push(h("div", { class: "sw", title: "Click to copy", onclick: () => copy(s.c) }, box, h("span", { text: `${s.c}  ×${s.n}` })));
+        });
+        if (!sec.swatches.length) parts.push(h("div", { class: "empty", text: "None" }));
+      }
+      if (sec.input && !q) {
+        const inp = h("input", { type: "text", class: "code", placeholder: sec.input.placeholder });
+        inp.addEventListener("keydown", (e) => {
+          e.stopPropagation();
+          if (e.key === "Enter" && inp.value.trim()) { const code = inp.value; inp.value = ""; sec.input.run(code); }
+        });
+        parts.push(inp);
       }
       if (sec.toggles && !q) {
         sec.toggles.forEach((t) => {
@@ -665,6 +1127,7 @@
     if (!frag.length) frag.push(h("div", { class: "empty", text: q ? "No matches." : "Nothing to show." }));
     body.replaceChildren(...frag);
     body.scrollTop = st;
+    if (hadFocus) { const ni = body.querySelector("input.code"); if (ni) { ni.value = typed; ni.focus(); } }
   };
 
   let rendering = false;
@@ -680,6 +1143,8 @@
 
   // ───────────────────────── events ─────────────────────────
   refreshBtn.onclick = render;
+  pickBtn.onclick = () => setPicking(!picking);
+  themeBtn.onclick = () => panel.classList.toggle("light");
   copyBtn.onclick = () => copy(JSON.stringify(toPlain(tabData), null, 2));
   closeBtn.onclick = () => cleanup();
   minBtn.onclick = () => {
@@ -728,6 +1193,7 @@
 
   // Hotkey: Alt+Shift+I hides / shows the panel
   const onKey = (e) => {
+    if (e.key === "Escape" && picking) setPicking(false);
     if (e.altKey && e.shiftKey && e.code === "KeyI") {
       host.style.display = host.style.display === "none" ? "" : "none";
     }
@@ -751,6 +1217,12 @@
     observers.forEach((o) => { try { o.disconnect(); } catch {} });
     removeEventListener("resize", clamp);
     removeEventListener("keydown", onKey, true);
+    try { setPicking(false); overlay.remove(); } catch {}
+    toggles.forEach((t) => { try { if (t.get()) t.set(false); } catch {} });
+    window.removeEventListener("error", onErr, true);
+    window.removeEventListener("unhandledrejection", onRej);
+    if (console.error === wrapErr) console.error = origConsole.error;
+    if (console.warn === wrapWarn) console.warn = origConsole.warn;
     // undo any page overlays we added
     try {
       const ours = Object.values(sheets);
