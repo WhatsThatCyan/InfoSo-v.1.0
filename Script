@@ -1,4 +1,4 @@
-/* 📄 InfoSo — paste into Chrome DevTools Console (F12 → Console) */
+/* InfoSo v.1.2 🎃 Halloween Edition — paste into Chrome DevTools Console (F12 → Console) */
 (() => {
   "use strict";
   const ID = "__infoso_panel__";
@@ -110,6 +110,7 @@
   const runJS = (code) => {
     const push = (text, level) => { replLog.push({ text, level }); if (replLog.length > 50) replLog.shift(); render(); };
     try {
+      if (code.trim().toLowerCase() === "boo") { setSpooky(!spooky.box); return push("👻 Boo!"); }
       const v = (0, eval)(code);
       if (v && typeof v.then === "function") {
         v.then((r) => push(`› ${code}\n  (resolved) ${trunc(strOf(r), 500)}`), (e) => push(`› ${code}\n  (rejected) ${trunc(strOf(e), 500)}`, "bad"));
@@ -218,6 +219,50 @@
         document.cookie = `${n}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/${dom}`;
       });
     });
+  };
+
+  // 🎃 Spooky page overlay: ghosts, bats, pumpkins drifting across the page (pointer-events: none)
+  const spooky = { box: null, sheet: null };
+  const setSpooky = (on) => {
+    try {
+      if (on && !spooky.box) {
+        const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const s = new CSSStyleSheet();
+        s.replaceSync("@keyframes infoso-drift{0%,100%{transform:translate(0,0) rotate(0)}50%{transform:translate(40px,-30px) rotate(8deg)}}@keyframes infoso-pagefly{from{transform:translateX(-10vw)}to{transform:translateX(110vw)}}");
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, s];
+        spooky.sheet = s;
+        const box = document.createElement("div");
+        box.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:2147483645;overflow:hidden;";
+        ["👻", "🦇", "🎃", "🕷️", "💀", "🦇", "👻", "🎃", "🦇", "🕸️"].forEach((ic, i) => {
+          const e = document.createElement("span");
+          e.textContent = ic;
+          const bat = ic === "🦇";
+          let css = `position:absolute;top:${6 + ((i * 37) % 80)}vh;left:${bat ? 0 : 4 + ((i * 29) % 88)}vw;font-size:${22 + (i % 3) * 10}px;opacity:.85;`;
+          if (!calm) css += bat ? `animation:infoso-pagefly ${10 + i * 2}s linear infinite ${i}s;` : `animation:infoso-drift ${4 + (i % 4)}s ease-in-out infinite ${(i * 0.4).toFixed(1)}s;`;
+          e.style.cssText = css;
+          box.appendChild(e);
+        });
+        document.documentElement.appendChild(box);
+        spooky.box = box;
+        flash("👻 Boo!");
+      } else if (!on && spooky.box) {
+        spooky.box.remove(); spooky.box = null;
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter((x) => x !== spooky.sheet);
+      }
+    } catch { flash("Blocked by page"); }
+  };
+
+  // Eyedropper (Chrome): pick any pixel on screen
+  const pickedColors = [];
+  const eyedrop = async () => {
+    if (!("EyeDropper" in window)) { flash("EyeDropper not supported here"); return; }
+    try {
+      const r = await new EyeDropper().open();
+      pickedColors.unshift({ c: r.sRGBHex, n: 1 });
+      if (pickedColors.length > 20) pickedColors.pop();
+      copy(r.sRGBHex);
+      render();
+    } catch {}
   };
 
   const detectTech = (scriptSrcs, sheetHrefs) => {
@@ -399,6 +444,32 @@
     const mixed = location.protocol === "https:" ? res.filter((r) => r.name.startsWith("http://")).length : 0;
     const iframes = [...d.querySelectorAll("iframe")].map((f) => `${trunc(f.src || "(about:blank)", 60)}  [sandbox: ${f.hasAttribute("sandbox") ? f.getAttribute("sandbox") || "all" : "none"}]`);
 
+    const hints = [...d.querySelectorAll('link[rel~="preload"],link[rel~="prefetch"],link[rel~="preconnect"],link[rel~="dns-prefetch"],link[rel~="modulepreload"]')]
+      .map((l) => `${l.rel}  ${trunc(l.href, 80)}`);
+
+    // Flesch reading ease (approximate, first 20k characters)
+    const syl = (w) => {
+      w = w.toLowerCase().replace(/[^a-z]/g, "");
+      if (!w) return 0;
+      if (w.length <= 3) return 1;
+      const m = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "").replace(/^y/, "").match(/[aeiouy]{1,2}/g);
+      return m ? m.length : 1;
+    };
+    const sampleTxt = bodyText.slice(0, 20000);
+    const sw = sampleTxt.split(/\s+/).filter(Boolean);
+    const sSent = Math.max(1, (sampleTxt.match(/[.!?]+(\s|$)/g) || []).length);
+    const sSyl = sw.reduce((a, w) => a + syl(w), 0);
+    const ease = sw.length >= 30 ? 206.835 - 1.015 * (sw.length / sSent) - 84.6 * (sSyl / sw.length) : null;
+    const easeLabel = ease === null ? "Not enough text" : `${Math.round(ease)}  (${ease >= 80 ? "easy" : ease >= 60 ? "plain English" : ease >= 30 ? "difficult" : "very difficult"})`;
+
+    // 🎃 days until Halloween
+    const nowD = new Date();
+    const todayMid = new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate());
+    let hDate = new Date(nowD.getFullYear(), 9, 31);
+    if (todayMid > hDate) hDate = new Date(nowD.getFullYear() + 1, 9, 31);
+    const daysToH = Math.round((hDate - todayMid) / 86400000);
+    const halloween = daysToH === 0 ? "It's Halloween! 👻" : `${daysToH} day${daysToH === 1 ? "" : "s"} to go`;
+
     const tech = detectTech(scriptSrcs, sheetHrefs);
     const fonts = safe(() => [...new Set([...d.fonts].map((f) => f.family.replace(/["']/g, "")))], []);
     const faviconList = [...d.querySelectorAll('link[rel~="icon" i]')].map((l) => l.href);
@@ -469,10 +540,14 @@
         "Video / audio": `${d.querySelectorAll("video").length} / ${d.querySelectorAll("audio").length}`,
         "Canvas / SVG": `${d.querySelectorAll("canvas").length} / ${d.querySelectorAll("svg").length}`,
         "iFrames": iframes.length,
+        "Reading ease (Flesch)": easeLabel,
+        "Page size": `${d.documentElement.scrollWidth} × ${d.documentElement.scrollHeight} px`,
+        "Scrolled": `${Math.round(scrollY)} px (${Math.round((100 * scrollY) / Math.max(1, d.documentElement.scrollHeight - innerHeight))}%)`,
       }),
       L("External scripts", scriptSrcs.map((s) => trunc(s, 90))),
       L("Stylesheets", sheetHrefs.map((s) => trunc(s, 90))),
       L("Fonts used", fonts),
+      L("Resource hints (preload / preconnect)", hints),
     ];
 
     const t = nav || {};
@@ -626,6 +701,7 @@
         "Data saver": conn ? String(conn.saveData) : "N/A",
         "Prefers dark mode": matchMedia("(prefers-color-scheme: dark)").matches,
         "Prefers reduced motion": matchMedia("(prefers-reduced-motion: reduce)").matches,
+        "🎃 Halloween countdown": halloween,
       }),
     ];
 
@@ -646,6 +722,11 @@
     // Tools tab
     tabs["Tools"] = [
       { title: "Page overlays", toggles: toggles },
+      S("About InfoSo", {
+        "Version": "v.1.2 — Halloween Edition 🎃",
+        "Hotkeys": "Alt+Shift+I hide/show · Alt+Shift+P pick element · Esc cancel pick",
+        "Easter egg": "Type  boo  in the Console tab's Run JavaScript box",
+      }),
       {
         title: "Actions", buttons: [
           { label: "Copy JSON", fn: () => copy(JSON.stringify(toPlain(tabData), null, 2)) },
@@ -713,6 +794,7 @@
       L("Font families (computed)", topN(ff, 8).map(([k, n]) => `${k}  ×${n}`)),
       L("Font sizes", topN(fsz, 8).map(([k, n]) => `${k}  ×${n}`)),
       L("CSS variables on :root", cssVars.slice(0, 80)),
+      { title: "Colors picked from screen", swatches: pickedColors, buttons: [{ label: "🎨 Pick color from screen", fn: eyedrop }] },
     ];
 
     // ── Accessibility ──
@@ -839,6 +921,33 @@
       ];
     }
 
+    // ── Page health score ──
+    const checks = [
+      ["HTTPS", location.protocol === "https:", 10],
+      ["Title tag (10–70 chars)", d.title.length >= 10 && d.title.length <= 70, 8],
+      ["Meta description (50–170 chars)", !!meta("description") && meta("description").length >= 50 && meta("description").length <= 170, 8],
+      ["Exactly one H1", h1count === 1, 6],
+      ["Language attribute set", !!d.documentElement.lang, 5],
+      ["Viewport meta (zoom allowed)", !!meta("viewport") && !zoomBlocked, 6],
+      ["Canonical link", !!d.querySelector('link[rel="canonical" i]'), 5],
+      ["Open Graph title + image", !!meta("og:title") && !!meta("og:image"), 5],
+      ["All images have alt", noAlt.length === 0, 8],
+      ["No unlabeled inputs / buttons / links", noLabel.length + btnNo.length + linkNo.length === 0, 8],
+      ["No duplicate IDs", dupIds.length === 0, 4],
+      ["No mixed content", mixed === 0, 8],
+      ["No console errors captured", errN === 0, 7],
+      ["Loaded in under 3 s", t.loadEventEnd > 0 && t.loadEventEnd < 3000, 6],
+      ["Layout stable (CLS < 0.1)", vitals.cls < 0.1, 6],
+    ];
+    const maxPts = checks.reduce((a, c) => a + c[2], 0);
+    const gotPts = checks.reduce((a, c) => a + (c[1] ? c[2] : 0), 0);
+    const score = Math.round((gotPts / maxPts) * 100);
+    const grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 55 ? "D" : "F";
+    tabs["Overview"].unshift(
+      S("Page health score", { "Score": lv(`${score}/100  (grade ${grade})`, score >= 80 ? "good" : score >= 60 ? "warn" : "bad") }),
+      L("Health checklist", checks.map((c) => ({ text: `${c[1] ? "✓" : "✗"}  ${c[0]}`, level: c[1] ? "good" : "warn" }))),
+    );
+
     const order = ["Overview", "Tech", "Perf", "Network", "Design", "Access", "Storage", "Page", "Security", "Console", "Inspect", "Device", "Headers", "Tools"];
     return Object.fromEntries(order.filter((n) => tabs[n]).map((n) => [n, tabs[n]]));
   };
@@ -892,7 +1001,10 @@
     cssToggle("Outline all elements", `*{outline:1px solid rgba(255,70,70,.55)!important}`),
     cssToggle("Highlight images missing alt", `img:not([alt]){outline:4px solid #ff2d55!important;outline-offset:-4px!important}`),
     cssToggle("Highlight links", `a[href]{background:rgba(255,235,59,.55)!important;outline:1px solid #f9a825!important}`),
+    { label: "🎃 Spooky page overlay (ghosts & bats)", get: () => !!spooky.box, set: (on) => setSpooky(on) },
     { label: "Inspect element (click on page)", get: () => picking, set: (on) => setPicking(on) },
+    cssToggle("Grayscale page (color-blind check)", `html{filter:grayscale(1)!important}`),
+    cssToggle("Blur text (privacy mode)", `p,h1,h2,h3,h4,h5,h6,span,a,li,td,th,label,button,input,textarea{filter:blur(5px)!important}`),
     cssToggle("Label headings (H1–H6)", ["h1", "h2", "h3", "h4", "h5", "h6"].map((t) => `${t}::before{content:"${t.toUpperCase()}";background:#4ea1ff;color:#fff;font:700 10px/1 sans-serif;padding:2px 4px;margin-right:6px;border-radius:3px;vertical-align:middle}`).join("")),
     cssToggle("Highlight external links", `a[href^="http"]:not([href*="${location.hostname}"]){outline:2px solid #ff9800!important;background:rgba(255,152,0,.25)!important}`),
     cssToggle("Highlight empty links", `a:not([href]),a[href=""],a[href="#"]{outline:3px dashed #ff2d55!important}`),
@@ -1014,13 +1126,52 @@
     .light .v:hover, .light .li:hover { background: #eef3f9; }
     .light .good { color: #1a7f37; } .light .warn { color: #9a6700; } .light .bad, .light .err { color: #cf222e; }
   `;
-  try { const sh = new CSSStyleSheet(); sh.replaceSync(css + css2); root.adoptedStyleSheets = [sh]; }
-  catch { const st = document.createElement("style"); st.textContent = css + css2; root.append(st); }
+  const css3 = `
+    .panel { position: relative; }
+    .fx { display: none; position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+    .halloween .fx { display: block; }
+    .fx span { position: absolute; opacity: .9; }
+    .fx .b1 { top: 3px; left: -24px; font-size: 14px; animation: infoso-fly 9s linear infinite; }
+    .fx .b2 { top: 20px; left: -24px; font-size: 11px; animation: infoso-fly 14s linear infinite 4s; }
+    .fx .g1 { bottom: 38px; right: 12px; font-size: 18px; opacity: .45; animation: infoso-float 3.6s ease-in-out infinite; }
+    .fx .web { bottom: 26px; left: 4px; font-size: 20px; opacity: .3; }
+    @keyframes infoso-fly {
+      0% { transform: translate(0, 0); } 25% { transform: translate(120px, 6px); } 50% { transform: translate(260px, -2px); }
+      75% { transform: translate(390px, 8px); } 100% { transform: translate(540px, 0); }
+    }
+    @keyframes infoso-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+    @media (prefers-reduced-motion: reduce) { .fx span { animation: none !important; } }
 
-  const panel = h("div", { class: "panel" });
+    .panel.halloween { background: #120a1c; color: #f3e9ff; border: 1px solid #ff7a1a;
+      box-shadow: 0 0 0 1px #3b1d57, 0 0 22px rgba(255,122,26,.35), 0 12px 36px rgba(0,0,0,.6); }
+    .halloween .bar { background: linear-gradient(90deg, #2a1240, #4a1d0a); border-bottom: 1px solid #ff7a1a; }
+    .halloween .title { color: #ff9d3c; text-shadow: 0 0 8px rgba(255,122,26,.7); font-family: Georgia, "Palatino Linotype", serif; letter-spacing: .06em; }
+    .halloween .ver { color: #b99ae0; text-shadow: none; font-family: system-ui, sans-serif; }
+    .halloween .tabs, .halloween .search { background: #1a0f28; border-color: #3b1d57; }
+    .halloween .tab { color: #b99ae0; }
+    .halloween .tab:hover { color: #ffb15c; }
+    .halloween .tab.on { color: #ff9d3c; border-bottom-color: #ff7a1a; }
+    .halloween .search input, .halloween input.code { background: #0c0614; border-color: #3b1d57; color: #f3e9ff; }
+    .halloween .search input:focus, .halloween input.code:focus { border-color: #ff7a1a; }
+    .halloween .ib, .halloween .btn { background: #2a1740; border-color: #4b2a73; color: #f3e9ff; }
+    .halloween .ib:hover, .halloween .btn:hover { background: #5a2d0c; }
+    .halloween .ib.on { background: #ff7a1a; color: #120a1c; }
+    .halloween .ib.close:hover { background: #c0392b; }
+    .halloween h4 { color: #ff9d3c; }
+    .halloween .row, .halloween .li { border-bottom-color: #2a1740; }
+    .halloween .k, .halloween .empty { color: #a58bcc; }
+    .halloween .v:hover, .halloween .li:hover { background: #241338; }
+    .halloween .foot { background: #1a0f28; border-top: 1px solid #3b1d57; color: #a58bcc; }
+    .halloween .good { color: #7dff9a; } .halloween .warn { color: #ffb020; } .halloween .bad, .halloween .err { color: #ff6b6b; }
+  `;
+  try { const sh = new CSSStyleSheet(); sh.replaceSync(css + css2 + css3); root.adoptedStyleSheets = [sh]; }
+  catch { const st = document.createElement("style"); st.textContent = css + css2 + css3; root.append(st); }
+
+  const panel = h("div", { class: "panel halloween" });
+  const titleText = h("span", { text: "🎃 InfoSo" });
   const title = h("span", { class: "title" },
-    h("span", { text: "📄 InfoSo" }),
-    h("small", { class: "ver", text: "v.1.1" }));
+    titleText,
+    h("small", { class: "ver", text: "v.1.2" }));
   const refreshBtn = h("button", { class: "ib", title: "Refresh", text: "⟳" });
   const copyBtn = h("button", { class: "ib", title: "Copy everything as JSON", text: "⧉" });
   const minBtn = h("button", { class: "ib", title: "Minimize", text: "–" });
@@ -1041,7 +1192,12 @@
   const errEl = h("span", { class: "err", onclick: () => { current = "Console"; draw(); } });
   const foot = h("div", { class: "foot" }, statusEl, errEl, fpsEl, liveLabel, opacity);
 
-  panel.append(bar, tabsEl, searchWrap, body, foot);
+  const fx = h("div", { class: "fx" },
+    h("span", { class: "b1", text: "🦇" }),
+    h("span", { class: "b2", text: "🦇" }),
+    h("span", { class: "g1", text: "👻" }),
+    h("span", { class: "web", text: "🕸️" }));
+  panel.append(bar, tabsEl, searchWrap, body, foot, fx);
   root.append(panel);
   document.documentElement.appendChild(host);
 
@@ -1144,7 +1300,17 @@
   // ───────────────────────── events ─────────────────────────
   refreshBtn.onclick = render;
   pickBtn.onclick = () => setPicking(!picking);
-  themeBtn.onclick = () => panel.classList.toggle("light");
+  const themes = ["halloween", "dark", "light"];
+  let themeIdx = 0;
+  const applyTheme = () => {
+    const t = themes[themeIdx];
+    panel.classList.remove("halloween", "light");
+    if (t !== "dark") panel.classList.add(t);
+    titleText.textContent = t === "halloween" ? "🎃 InfoSo" : "📄 InfoSo";
+    themeBtn.title = `Theme: ${t} (click to switch)`;
+  };
+  themeBtn.onclick = () => { themeIdx = (themeIdx + 1) % themes.length; applyTheme(); flash(`Theme: ${themes[themeIdx]}`); };
+  applyTheme();
   copyBtn.onclick = () => copy(JSON.stringify(toPlain(tabData), null, 2));
   closeBtn.onclick = () => cleanup();
   minBtn.onclick = () => {
@@ -1194,6 +1360,7 @@
   // Hotkey: Alt+Shift+I hides / shows the panel
   const onKey = (e) => {
     if (e.key === "Escape" && picking) setPicking(false);
+    if (e.altKey && e.shiftKey && e.code === "KeyP") setPicking(!picking);
     if (e.altKey && e.shiftKey && e.code === "KeyI") {
       host.style.display = host.style.display === "none" ? "" : "none";
     }
